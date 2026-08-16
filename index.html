@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chain Reaction — Admin</title>
+<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+<style>
+  :root {
+    --bg: #14100d;
+    --panel: #1c1712;
+    --panel-2: #241d17;
+    --line: #332a20;
+    --text: #f2ece2;
+    --text-dim: #a89a86;
+    --accent: #d4896b;
+    --accent-dim: #7a5340;
+    --danger: #d46b6b;
+    --good: #7fae7a;
+    --mono: 'SF Mono', 'Consolas', 'Menlo', monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    padding: 2rem 1.2rem 4rem;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+
+  h1 { font-size: 1.3rem; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 0.2rem; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 0.4rem;
+  }
+  .sub { color: var(--text-dim); font-size: 13px; margin-bottom: 1.6rem; }
+
+  /* GATE */
+  .gate {
+    max-width: 340px; margin: 4rem auto 0; text-align: center;
+  }
+  .gate input {
+    width: 100%; padding: 12px 14px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text);
+    font-size: 14px; text-align: center; outline: none; margin-bottom: 0.7rem;
+  }
+  .gate input:focus { border-color: var(--accent); }
+  .gate-note { font-size: 11px; color: var(--text-dim); margin-top: 1rem; line-height: 1.5; }
+
+  button {
+    font-family: inherit; cursor: pointer; border: none; border-radius: 8px;
+    font-size: 13px; font-weight: 600; padding: 9px 16px; transition: filter 0.12s;
+  }
+  button:hover { filter: brightness(1.12); }
+  button:disabled { opacity: 0.4; cursor: default; filter: none; }
+  .btn-primary { background: var(--accent); color: #1c1108; }
+  .btn-quiet { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
+  .btn-danger { background: var(--danger); color: #2a0d0d; }
+
+  /* TOOLBAR */
+  .toolbar { display: flex; gap: 0.6rem; margin-bottom: 1rem; align-items: center; }
+  .toolbar input[type=text] {
+    flex: 1; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--text); font-size: 13px; outline: none;
+  }
+  .toolbar input[type=text]:focus { border-color: var(--accent); }
+  .count { font-family: var(--mono); font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+
+  /* TABLE */
+  .list { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .row {
+    display: grid; grid-template-columns: 1fr 1fr auto auto;
+    gap: 0.8rem; align-items: center;
+    padding: 10px 14px; border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .row:last-child { border-bottom: none; }
+  .row:nth-child(even) { background: var(--panel-2); }
+  .row.head {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-dim); background: var(--panel-2); padding: 8px 14px;
+  }
+  .uname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .uname input {
+    width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--accent);
+    background: var(--bg); color: var(--text); font-size: 13px; outline: none;
+  }
+  .uid { font-family: var(--mono); font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .seen { font-family: var(--mono); font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+  .actions { display: flex; gap: 6px; white-space: nowrap; }
+  .actions button { padding: 6px 11px; font-size: 12px; }
+
+  .empty, .loading {
+    text-align: center; padding: 3rem 1rem; color: var(--text-dim); font-size: 13px;
+  }
+
+  .status {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 18px; font-size: 13px; opacity: 0; pointer-events: none;
+    transition: opacity 0.2s, transform 0.2s; max-width: 90vw;
+  }
+  .status.show { opacity: 1; transform: translateX(-50%) translateY(-4px); }
+  .status.good { border-color: var(--good); color: var(--good); }
+  .status.bad { border-color: var(--danger); color: var(--danger); }
+
+  @media (max-width: 620px) {
+    .row { grid-template-columns: 1fr auto; grid-template-areas: "name actions" "uid uid" "seen seen"; row-gap: 4px; }
+    .row.head { display: none; }
+    .uname { grid-area: name; }
+    .actions { grid-area: actions; justify-self: end; }
+    .uid { grid-area: uid; }
+    .seen { grid-area: seen; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <div id="gate" class="gate">
+    <div class="eyebrow">Chain Reaction</div>
+    <h1>Admin access</h1>
+    <div class="sub">Enter the admin password to continue.</div>
+    <input type="password" id="gate-pw" placeholder="Password" autofocus>
+    <button class="btn-primary" style="width:100%" onclick="tryUnlock()">Unlock</button>
+    <div class="gate-note">
+      This password only hides the panel in your browser — it is not real security.
+      The actual protection has to come from your Firebase Realtime Database rules
+      (e.g. restrict writes to <code>users/*</code> and <code>usernames/*</code> to a specific
+      admin account). Anyone with write access to the database can rename users regardless
+      of this screen.
+    </div>
+  </div>
+
+  <div id="panel" style="display:none;">
+    <div class="eyebrow">Chain Reaction</div>
+    <h1>Username admin</h1>
+    <div class="sub">Rename players. Updates their profile, frees up their old name, and relabels their past chat messages.</div>
+
+    <div class="toolbar">
+      <input type="text" id="search" placeholder="Search by username or user id…" oninput="renderList()">
+      <button class="btn-quiet" onclick="loadUsers()">Refresh</button>
+      <span class="count" id="count"></span>
+    </div>
+
+    <div class="list" id="list">
+      <div class="loading">Loading users…</div>
+    </div>
+  </div>
+
+</div>
+
+<div class="status" id="status"></div>
+
+<script>
+  // ======== SAME FIREBASE PROJECT AS THE GAME ========
+  var fbApp = firebase.initializeApp({
+    apiKey: atob('QUl6YVN5Q1hmWlVzY3RxUmotSjZMblEtV2ItNXdraURqYi10Sk04'),
+    authDomain: "chainreaction-usernamelist.firebaseapp.com",
+    databaseURL: "https://chainreaction-usernamelist-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "chainreaction-usernamelist",
+    storageBucket: "chainreaction-usernamelist.firebasestorage.app",
+    messagingSenderId: "1013659619628",
+    appId: "1:1013659619628:web:3100ed4eda5164e5159c89"
+  });
+  var db = firebase.database();
+
+  // ======== SIMPLE CLIENT-SIDE GATE ========
+  // Change this to whatever you like. Again: this is a UI convenience, not security.
+  var ADMIN_PASSWORD = "changeme";
+
+  function tryUnlock() {
+    var pw = document.getElementById('gate-pw').value;
+    if (pw === ADMIN_PASSWORD) {
+      document.getElementById('gate').style.display = 'none';
+      document.getElementById('panel').style.display = 'block';
+      loadUsers();
+    } else {
+      showStatus('Wrong password.', true);
+    }
+  }
+  document.getElementById('gate-pw').onkeydown = function(e) {
+    if (e.key === 'Enter') tryUnlock();
+  };
+
+  // ======== STATUS TOAST ========
+  var statusTimer = null;
+  function showStatus(msg, isBad) {
+    var el = document.getElementById('status');
+    el.textContent = msg;
+    el.className = 'status show ' + (isBad ? 'bad' : 'good');
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(function() { el.className = 'status'; }, 3200);
+  }
+
+  // ======== USER LIST ========
+  var allUsers = []; // { id, username, lastSeen }
+  var editingId = null;
+
+  function loadUsers() {
+    document.getElementById('list').innerHTML = '<div class="loading">Loading users…</div>';
+    db.ref('users').once('value', function(snap) {
+      allUsers = [];
+      snap.forEach(function(child) {
+        var v = child.val() || {};
+        allUsers.push({ id: child.key, username: v.username || '(none)', lastSeen: v.lastSeen || 0 });
+      });
+      allUsers.sort(function(a, b) { return b.lastSeen - a.lastSeen; });
+      renderList();
+    }, function(err) {
+      document.getElementById('list').innerHTML = '<div class="empty">Could not load users: ' + escHtml(err.message) + '</div>';
+    });
+  }
+
+  function fmtSeen(ts) {
+    if (!ts) return '—';
+    var d = new Date(ts);
+    var diff = Date.now() - ts;
+    if (diff < 60000) return 'just now';
+    if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+    if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+    return d.toLocaleDateString();
+  }
+
+  function renderList() {
+    var q = document.getElementById('search').value.trim().toLowerCase();
+    var filtered = allUsers.filter(function(u) {
+      return !q || u.username.toLowerCase().indexOf(q) !== -1 || u.id.toLowerCase().indexOf(q) !== -1;
+    });
+    document.getElementById('count').textContent = filtered.length + ' / ' + allUsers.length + ' users';
+
+    var list = document.getElementById('list');
+    if (filtered.length === 0) {
+      list.innerHTML = '<div class="empty">No users match.</div>';
+      return;
+    }
+
+    var html = '<div class="row head"><div>Username</div><div>User ID</div><div>Last seen</div><div>Actions</div></div>';
+    filtered.forEach(function(u) {
+      var isEditing = editingId === u.id;
+      html += '<div class="row" data-id="' + escAttr(u.id) + '">';
+      if (isEditing) {
+        html += '<div class="uname"><input type="text" id="edit-input" maxlength="16" value="' + escAttr(u.username === '(none)' ? '' : u.username) + '"></div>';
+      } else {
+        html += '<div class="uname">' + escHtml(u.username) + '</div>';
+      }
+      html += '<div class="uid">' + escHtml(u.id) + '</div>';
+      html += '<div class="seen">' + fmtSeen(u.lastSeen) + '</div>';
+      html += '<div class="actions">';
+      if (isEditing) {
+        html += '<button class="btn-primary" onclick="saveRename(\'' + escJs(u.id) + '\')">Save</button>';
+        html += '<button class="btn-quiet" onclick="cancelEdit()">Cancel</button>';
+      } else {
+        html += '<button class="btn-quiet" onclick="startEdit(\'' + escJs(u.id) + '\')">Rename</button>';
+      }
+      html += '</div></div>';
+    });
+    list.innerHTML = html;
+
+    if (isEditing_currentlyInDom()) {
+      var inp = document.getElementById('edit-input');
+      if (inp) {
+        inp.focus();
+        inp.select();
+        inp.onkeydown = function(e) {
+          if (e.key === 'Enter') saveRename(editingId);
+          if (e.key === 'Escape') cancelEdit();
+        };
+      }
+    }
+  }
+  function isEditing_currentlyInDom() { return !!editingId; }
+
+  function startEdit(id) {
+    editingId = id;
+    renderList();
+  }
+  function cancelEdit() {
+    editingId = null;
+    renderList();
+  }
+
+  function saveRename(id) {
+    var inp = document.getElementById('edit-input');
+    if (!inp) return;
+    var newName = inp.value.trim();
+    if (!newName) { showStatus('Username can\'t be empty.', true); return; }
+    if (newName.length > 16) { showStatus('Username is too long (max 16).', true); return; }
+
+    var user = allUsers.find(function(u) { return u.id === id; });
+    if (!user) return;
+    var oldName = user.username === '(none)' ? '' : user.username;
+
+    if (newName === oldName) { cancelEdit(); return; }
+
+    var key = newName.toLowerCase();
+
+    // Check the new name isn't already taken by someone else
+    db.ref('usernames/' + key).once('value', function(snap) {
+      if (snap.exists() && snap.val() !== id) {
+        showStatus('"' + newName + '" is already taken by another user.', true);
+        return;
+      }
+      applyRename(id, oldName, newName);
+    }, function(err) {
+      showStatus('Rename failed: ' + err.message, true);
+    });
+  }
+
+  function applyRename(id, oldName, newName) {
+    var updates = {};
+    updates['users/' + id + '/username'] = newName;
+    updates['usernames/' + newName.toLowerCase()] = id;
+    if (oldName) updates['usernames/' + oldName.toLowerCase()] = null; // release old name
+
+    db.ref().update(updates).then(function() {
+      relabelChatMessages(id, newName);
+      var u = allUsers.find(function(u) { return u.id === id; });
+      if (u) u.username = newName;
+      editingId = null;
+      renderList();
+      showStatus('Renamed to "' + newName + '".');
+    }).catch(function(err) {
+      showStatus('Rename failed: ' + err.message, true);
+    });
+  }
+
+  // Relabel this user's past chat messages (global + every room) to their new name.
+  // Best-effort — doesn't block or reverse the rename if it partially fails.
+  function relabelChatMessages(userId, newName) {
+    db.ref('chat/global').orderByChild('userId').equalTo(userId).once('value', function(snap) {
+      var updates = {};
+      snap.forEach(function(child) { updates[child.key + '/username'] = newName; });
+      if (Object.keys(updates).length) db.ref('chat/global').update(updates);
+    });
+
+    db.ref('chat/rooms').once('value', function(roomsSnap) {
+      roomsSnap.forEach(function(roomChild) {
+        var roomCode = roomChild.key;
+        db.ref('chat/rooms/' + roomCode).orderByChild('userId').equalTo(userId).once('value', function(snap) {
+          var updates = {};
+          snap.forEach(function(child) { updates[child.key + '/username'] = newName; });
+          if (Object.keys(updates).length) db.ref('chat/rooms/' + roomCode).update(updates);
+        });
+      });
+    });
+  }
+
+  // ======== ESCAPING HELPERS ========
+  function escHtml(s) {
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c];
+    });
+  }
+  function escAttr(s) { return escHtml(s); }
+  function escJs(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+</script>
+
+</body>
+</html>
