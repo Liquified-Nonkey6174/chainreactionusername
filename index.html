@@ -70,13 +70,14 @@
   /* TABLE */
   .list { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
   .row {
-    display: grid; grid-template-columns: 1fr 1fr auto auto;
+    display: grid; grid-template-columns: 1fr 1fr 1fr auto auto;
     gap: 0.8rem; align-items: center;
     padding: 10px 14px; border-bottom: 1px solid var(--line);
     background: var(--panel);
   }
   .row:last-child { border-bottom: none; }
   .row:nth-child(even) { background: var(--panel-2); }
+  .row.blocked { background: rgba(212, 107, 107, 0.1); }
   .row.head {
     font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
     color: var(--text-dim); background: var(--panel-2); padding: 8px 14px;
@@ -87,6 +88,9 @@
     background: var(--bg); color: var(--text); font-size: 13px; outline: none;
   }
   .uid { font-family: var(--mono); font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .code { font-family: var(--mono); font-size: 12px; letter-spacing: 0.03em; }
+  .code.none { color: var(--text-dim); font-style: italic; }
+  .code.blocked-tag { color: var(--danger); }
   .seen { font-family: var(--mono); font-size: 11px; color: var(--text-dim); white-space: nowrap; }
   .actions { display: flex; gap: 6px; white-space: nowrap; }
   .actions button { padding: 6px 11px; font-size: 12px; }
@@ -106,11 +110,12 @@
   .status.bad { border-color: var(--danger); color: var(--danger); }
 
   @media (max-width: 620px) {
-    .row { grid-template-columns: 1fr auto; grid-template-areas: "name actions" "uid uid" "seen seen"; row-gap: 4px; }
+    .row { grid-template-columns: 1fr auto; grid-template-areas: "name actions" "uid uid" "code code" "seen seen"; row-gap: 4px; }
     .row.head { display: none; }
     .uname { grid-area: name; }
     .actions { grid-area: actions; justify-self: end; }
     .uid { grid-area: uid; }
+    .code { grid-area: code; }
     .seen { grid-area: seen; }
   }
 </style>
@@ -128,9 +133,9 @@
     <div class="gate-note">
       This password only hides the panel in your browser — it is not real security.
       The actual protection has to come from your Firebase Realtime Database rules
-      (e.g. restrict writes to <code>users/*</code> and <code>usernames/*</code> to a specific
-      admin account). Anyone with write access to the database can rename users regardless
-      of this screen.
+      (e.g. restrict writes to <code>users/*</code>, <code>usernames/*</code>, and
+      <code>banned/*</code> to a specific admin account). Anyone with write access to the
+      database can rename or block users regardless of this screen.
     </div>
   </div>
 
@@ -140,7 +145,7 @@
     <div class="sub">Rename players. Updates their profile, frees up their old name, and relabels their past chat messages.</div>
 
     <div class="toolbar">
-      <input type="text" id="search" placeholder="Search by username or user id…" oninput="renderList()">
+      <input type="text" id="search" placeholder="Search by username, user id, or code…" oninput="renderList()">
       <button class="btn-quiet" onclick="loadUsers()">Refresh</button>
       <span class="count" id="count"></span>
     </div>
@@ -196,56 +201,66 @@
   }
 
   // ======== USER LIST ========
-  var allUsers = []; // { id, username, lastSeen }
+  var allUsers = []; // { id, username, lastSeen, secret }
+  var bannedCodes = {}; // secret -> { reason, bannedAt }
   var editingId = null;
 
   // The /users node was never actually populated (no write rule existed for it
   // until now), so the real source of truth is /usernames: { "somename": "u_xxxx" }.
   // We read that instead. It only gives us the lowercased key as the name, so we
-  // also check /users/{id} in case a corrected-case version exists there for any user.
+  // also check /users/{id} in case a corrected-case version exists there for any user
+  // (that's also where each user's 10-digit device code lives, as .secret).
   function loadUsers() {
     document.getElementById('list').innerHTML = '<div class="loading">Loading users…</div>';
-    db.ref('usernames').once('value', function(unamesSnap) {
-      var entries = [];
-      unamesSnap.forEach(function(child) {
-        entries.push({ nameKey: child.key, id: child.val() });
-      });
 
-      if (entries.length === 0) {
-        allUsers = [];
-        renderList();
-        return;
-      }
+    db.ref('banned').once('value', function(bannedSnap) {
+      bannedCodes = bannedSnap.val() || {};
 
-      var remaining = entries.length;
-      var results = [];
-      entries.forEach(function(e) {
-        db.ref('users/' + e.id).once('value', function(uSnap) {
-          var v = uSnap.val() || {};
-          results.push({
-            id: e.id,
-            username: v.username || e.nameKey,
-            lastSeen: v.lastSeen || 0
-          });
-          remaining--;
-          if (remaining === 0) {
-            allUsers = results;
-            allUsers.sort(function(a, b) { return b.lastSeen - a.lastSeen; });
-            renderList();
-          }
-        }, function() {
-          // /users read denied or missing for this id — fall back to the usernames key
-          results.push({ id: e.id, username: e.nameKey, lastSeen: 0 });
-          remaining--;
-          if (remaining === 0) {
-            allUsers = results;
-            allUsers.sort(function(a, b) { return b.lastSeen - a.lastSeen; });
-            renderList();
-          }
+      db.ref('usernames').once('value', function(unamesSnap) {
+        var entries = [];
+        unamesSnap.forEach(function(child) {
+          entries.push({ nameKey: child.key, id: child.val() });
         });
+
+        if (entries.length === 0) {
+          allUsers = [];
+          renderList();
+          return;
+        }
+
+        var remaining = entries.length;
+        var results = [];
+        entries.forEach(function(e) {
+          db.ref('users/' + e.id).once('value', function(uSnap) {
+            var v = uSnap.val() || {};
+            results.push({
+              id: e.id,
+              username: v.username || e.nameKey,
+              lastSeen: v.lastSeen || 0,
+              secret: v.secret || null
+            });
+            remaining--;
+            if (remaining === 0) {
+              allUsers = results;
+              allUsers.sort(function(a, b) { return b.lastSeen - a.lastSeen; });
+              renderList();
+            }
+          }, function() {
+            // /users read denied or missing for this id — fall back to the usernames key
+            results.push({ id: e.id, username: e.nameKey, lastSeen: 0, secret: null });
+            remaining--;
+            if (remaining === 0) {
+              allUsers = results;
+              allUsers.sort(function(a, b) { return b.lastSeen - a.lastSeen; });
+              renderList();
+            }
+          });
+        });
+      }, function(err) {
+        document.getElementById('list').innerHTML = '<div class="empty">Could not load users: ' + escHtml(err.message) + '</div>';
       });
     }, function(err) {
-      document.getElementById('list').innerHTML = '<div class="empty">Could not load users: ' + escHtml(err.message) + '</div>';
+      document.getElementById('list').innerHTML = '<div class="empty">Could not load block list: ' + escHtml(err.message) + '</div>';
     });
   }
 
@@ -262,7 +277,9 @@
   function renderList() {
     var q = document.getElementById('search').value.trim().toLowerCase();
     var filtered = allUsers.filter(function(u) {
-      return !q || u.username.toLowerCase().indexOf(q) !== -1 || u.id.toLowerCase().indexOf(q) !== -1;
+      return !q || u.username.toLowerCase().indexOf(q) !== -1 ||
+        u.id.toLowerCase().indexOf(q) !== -1 ||
+        (u.secret && u.secret.indexOf(q) !== -1);
     });
     document.getElementById('count').textContent = filtered.length + ' / ' + allUsers.length + ' users';
 
@@ -272,16 +289,22 @@
       return;
     }
 
-    var html = '<div class="row head"><div>Username</div><div>User ID</div><div>Last seen</div><div>Actions</div></div>';
+    var html = '<div class="row head"><div>Username</div><div>User ID</div><div>Code</div><div>Last seen</div><div>Actions</div></div>';
     filtered.forEach(function(u) {
       var isEditing = editingId === u.id;
-      html += '<div class="row" data-id="' + escAttr(u.id) + '">';
+      var isBlocked = u.secret && bannedCodes[u.secret];
+      html += '<div class="row' + (isBlocked ? ' blocked' : '') + '" data-id="' + escAttr(u.id) + '">';
       if (isEditing) {
         html += '<div class="uname"><input type="text" id="edit-input" maxlength="16" value="' + escAttr(u.username === '(none)' ? '' : u.username) + '"></div>';
       } else {
         html += '<div class="uname">' + escHtml(u.username) + '</div>';
       }
       html += '<div class="uid">' + escHtml(u.id) + '</div>';
+      if (u.secret) {
+        html += '<div class="code' + (isBlocked ? ' blocked-tag' : '') + '">' + escHtml(u.secret) + (isBlocked ? ' 🚫' : '') + '</div>';
+      } else {
+        html += '<div class="code none">not synced yet</div>';
+      }
       html += '<div class="seen">' + fmtSeen(u.lastSeen) + '</div>';
       html += '<div class="actions">';
       if (isEditing) {
@@ -289,6 +312,13 @@
         html += '<button class="btn-quiet" onclick="cancelEdit()">Cancel</button>';
       } else {
         html += '<button class="btn-quiet" onclick="startEdit(\'' + escJs(u.id) + '\')">Rename</button>';
+        if (u.secret) {
+          if (isBlocked) {
+            html += '<button class="btn-quiet" onclick="unblockCode(\'' + escJs(u.secret) + '\')">Unblock</button>';
+          } else {
+            html += '<button class="btn-danger" onclick="blockCode(\'' + escJs(u.secret) + '\', \'' + escJs(u.username) + '\')">Block</button>';
+          }
+        }
       }
       html += '</div></div>';
     });
@@ -359,6 +389,40 @@
       showStatus('Renamed to "' + newName + '".');
     }).catch(function(err) {
       showStatus('Rename failed: ' + err.message, true);
+    });
+  }
+
+  // ======== BLOCK / UNBLOCK BY 10-DIGIT DEVICE CODE ========
+  // Blocking is keyed on the device's secret code (stored in their browser's
+  // localStorage and mirrored to users/{id}/secret), not the username or user id —
+  // so it survives them changing their name, and follows the device even if they
+  // register a new username. Enforced client-side in the game itself: a blocked
+  // device can still play locally against AI, but can't connect to online rooms
+  // or send chat.
+  function blockCode(code, username) {
+    if (!code) return;
+    var reason = prompt('Block code ' + code + ' (' + username + ')?\nOptional reason (shown to them):', '');
+    if (reason === null) return; // cancelled
+    db.ref('banned/' + code).set({
+      reason: reason || '',
+      bannedAt: firebase.database.ServerValue.TIMESTAMP
+    }).then(function() {
+      bannedCodes[code] = { reason: reason || '' };
+      renderList();
+      showStatus('Blocked code ' + code + '.');
+    }).catch(function(err) {
+      showStatus('Block failed: ' + err.message, true);
+    });
+  }
+
+  function unblockCode(code) {
+    if (!code) return;
+    db.ref('banned/' + code).remove().then(function() {
+      delete bannedCodes[code];
+      renderList();
+      showStatus('Unblocked code ' + code + '.');
+    }).catch(function(err) {
+      showStatus('Unblock failed: ' + err.message, true);
     });
   }
 
