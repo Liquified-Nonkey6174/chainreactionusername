@@ -319,6 +319,7 @@
             html += '<button class="btn-danger" onclick="blockCode(\'' + escJs(u.secret) + '\', \'' + escJs(u.username) + '\')">Block</button>';
           }
         }
+        html += '<button class="btn-danger" onclick="deleteAccount(\'' + escJs(u.id) + '\', \'' + escJs(u.username) + '\')">Delete</button>';
       }
       html += '</div></div>';
     });
@@ -423,6 +424,27 @@
       showStatus('Unblocked code ' + code + '.');
     }).catch(function(err) {
       showStatus('Unblock failed: ' + err.message, true);
+    });
+  }
+
+  // ======== DELETE ACCOUNT (release username claim) ========
+  // Removes users/{id} and frees up usernames/{name} so someone else can claim it.
+  // Doesn't touch banned/{code} — if this device was blocked, it stays blocked even
+  // after the account is gone. Doesn't rewrite their old chat messages; those stay
+  // attributed to whatever username they last had.
+  function deleteAccount(id, username) {
+    if (!confirm('Delete this account?\n\n"' + username + '" (' + id + ')\n\nThis frees up the username for anyone to claim. This can\'t be undone.')) return;
+    var updates = {};
+    updates['users/' + id] = null;
+    if (username && username !== '(none)') {
+      updates['usernames/' + username.toLowerCase()] = null;
+    }
+    db.ref().update(updates).then(function() {
+      allUsers = allUsers.filter(function(u) { return u.id !== id; });
+      renderList();
+      showStatus('Deleted "' + username + '".');
+    }).catch(function(err) {
+      showStatus('Delete failed: ' + err.message, true);
     });
   }
 
