@@ -147,6 +147,7 @@
     <div class="toolbar">
       <input type="text" id="search" placeholder="Search by username, user id, or code…" oninput="renderList()">
       <button class="btn-quiet" onclick="loadUsers()">Refresh</button>
+      <button class="btn-quiet" id="cleanup-btn" onclick="cleanupStaleClaims()" style="display:none;">Clean up stale claims</button>
       <span class="count" id="count"></span>
     </div>
 
@@ -233,9 +234,15 @@
         entries.forEach(function(e) {
           db.ref('users/' + e.id).once('value', function(uSnap) {
             var v = uSnap.val() || {};
+            var canonicalName = v.username || e.nameKey;
             results.push({
               id: e.id,
-              username: v.username || e.nameKey,
+              nameKey: e.nameKey,
+              username: canonicalName,
+              // A stale claim is a /usernames entry whose key no longer matches
+              // this user's current username on /users — leftover from a rename
+              // where the old claim didn't get released.
+              stale: v.username ? (e.nameKey !== v.username.toLowerCase()) : false,
               lastSeen: v.lastSeen || 0,
               secret: v.secret || null
             });
@@ -247,7 +254,7 @@
             }
           }, function() {
             // /users read denied or missing for this id — fall back to the usernames key
-            results.push({ id: e.id, username: e.nameKey, lastSeen: 0, secret: null });
+            results.push({ id: e.id, nameKey: e.nameKey, username: e.nameKey, stale: false, lastSeen: 0, secret: null });
             remaining--;
             if (remaining === 0) {
               allUsers = results;
@@ -290,11 +297,15 @@
     }
 
     var html = '<div class="row head"><div>Username</div><div>User ID</div><div>Code</div><div>Last seen</div><div>Actions</div></div>';
+    var staleCount = 0;
     filtered.forEach(function(u) {
       var isEditing = editingId === u.id;
       var isBlocked = u.secret && bannedCodes[u.secret];
+      if (u.stale) staleCount++;
       html += '<div class="row' + (isBlocked ? ' blocked' : '') + '" data-id="' + escAttr(u.id) + '">';
-      if (isEditing) {
+      if (u.stale) {
+        html += '<div class="uname">' + escHtml(u.nameKey) + ' <span style="color:var(--danger);font-family:var(--mono);font-size:10px;">stale claim → now "' + escHtml(u.username) + '"</span></div>';
+      } else if (isEditing) {
         html += '<div class="uname"><input type="text" id="edit-input" maxlength="16" value="' + escAttr(u.username === '(none)' ? '' : u.username) + '"></div>';
       } else {
         html += '<div class="uname">' + escHtml(u.username) + '</div>';
@@ -307,7 +318,9 @@
       }
       html += '<div class="seen">' + fmtSeen(u.lastSeen) + '</div>';
       html += '<div class="actions">';
-      if (isEditing) {
+      if (u.stale) {
+        html += '<button class="btn-danger" onclick="removeStaleClaim(\'' + escJs(u.nameKey) + '\')">Remove claim</button>';
+      } else if (isEditing) {
         html += '<button class="btn-primary" onclick="saveRename(\'' + escJs(u.id) + '\')">Save</button>';
         html += '<button class="btn-quiet" onclick="cancelEdit()">Cancel</button>';
       } else {
@@ -324,6 +337,8 @@
       html += '</div></div>';
     });
     list.innerHTML = html;
+    document.getElementById('cleanup-btn').style.display = staleCount > 0 ? '' : 'none';
+    if (staleCount > 0) document.getElementById('cleanup-btn').textContent = 'Clean up ' + staleCount + ' stale claim' + (staleCount > 1 ? 's' : '');
 
     if (isEditing_currentlyInDom()) {
       var inp = document.getElementById('edit-input');
@@ -390,6 +405,38 @@
       showStatus('Renamed to "' + newName + '".');
     }).catch(function(err) {
       showStatus('Rename failed: ' + err.message, true);
+    });
+  }
+
+  // ======== DUPLICATE / STALE CLAIM CLEANUP ========
+  // A stale claim is a /usernames entry left behind by an old rename that didn't
+  // fully release (pre-existing bug, now fixed in the game's rename flow — this
+  // is for cleaning up ones that already exist). It just frees the old name back up;
+  // it never touches the account itself.
+  function removeStaleClaim(nameKey) {
+    db.ref('usernames/' + nameKey).remove().then(function() {
+      allUsers = allUsers.filter(function(u) { return u.nameKey !== nameKey; });
+      renderList();
+      showStatus('Freed up "' + nameKey + '".');
+    }).catch(function(err) {
+      showStatus('Failed to remove claim: ' + err.message, true);
+    });
+  }
+
+  function cleanupStaleClaims() {
+    var stale = allUsers.filter(function(u) { return u.stale; });
+    if (stale.length === 0) return;
+    if (!confirm('Free up ' + stale.length + ' stale username claim' + (stale.length > 1 ? 's' : '') + '? This only removes the old name reservations — it does not touch any accounts.')) return;
+    var updates = {};
+    stale.forEach(function(u) { updates['usernames/' + u.nameKey] = null; });
+    db.ref().update(updates).then(function() {
+      var staleKeys = {};
+      stale.forEach(function(u) { staleKeys[u.nameKey] = true; });
+      allUsers = allUsers.filter(function(u) { return !staleKeys[u.nameKey]; });
+      renderList();
+      showStatus('Cleaned up ' + stale.length + ' stale claim' + (stale.length > 1 ? 's' : '') + '.');
+    }).catch(function(err) {
+      showStatus('Cleanup failed: ' + err.message, true);
     });
   }
 
