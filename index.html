@@ -119,6 +119,23 @@
     text-align: center; padding: 3rem 1rem; color: var(--text-dim); font-size: 13px;
   }
 
+  /* ANNOUNCEMENTS */
+  .section-gap { margin-top: 2.4rem; }
+  .section-title { font-size: 1rem; font-weight: 700; margin: 0 0 0.2rem; }
+  .announce-box {
+    border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--panel);
+  }
+  .announce-box textarea {
+    width: 100%; min-height: 140px; resize: vertical; border: none; outline: none;
+    background: var(--panel); color: var(--text); font-family: inherit; font-size: 13px;
+    line-height: 1.5; padding: 12px 14px; display: block;
+  }
+  .announce-box .announce-footer {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 14px; border-top: 1px solid var(--line); background: var(--panel-2);
+  }
+  .announce-hint { font-size: 11px; color: var(--text-dim); }
+
   .status {
     position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
     background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
@@ -174,6 +191,18 @@
     <div class="list" id="list">
       <div class="loading">Loading users…</div>
     </div>
+
+    <div class="section-gap">
+      <div class="section-title">Announcements</div>
+      <div class="sub">Shown in a box below global chat in the game. Supports multiple lines.</div>
+      <div class="announce-box">
+        <textarea id="announce-input" placeholder="Nothing posted right now."></textarea>
+        <div class="announce-footer">
+          <span class="announce-hint" id="announce-saved-hint"></span>
+          <button class="btn-primary" onclick="saveAnnouncement()">Post</button>
+        </div>
+      </div>
+    </div>
   </div>
 
 </div>
@@ -203,6 +232,7 @@
       document.getElementById('gate').style.display = 'none';
       document.getElementById('panel').style.display = 'block';
       loadUsers();
+      loadAnnouncement();
     } else {
       showStatus('Wrong password.', true);
     }
@@ -219,6 +249,36 @@
     el.className = 'status show ' + (isBad ? 'bad' : 'good');
     clearTimeout(statusTimer);
     statusTimer = setTimeout(function() { el.className = 'status'; }, 3200);
+  }
+
+  // ======== ANNOUNCEMENTS ========
+  // Single text node at announcements/text. Using a <textarea> (not a single-line
+  // input or a prompt()) is what actually makes newlines work — those other inputs
+  // either can't hold a newline at all or silently strip it. The raw string,
+  // newlines included, is what gets written and later read straight back with
+  // textContent in the game — no per-line splitting or joining on either end.
+  function loadAnnouncement() {
+    db.ref('announcements/text').once('value', function(snap) {
+      var ta = document.getElementById('announce-input');
+      if (ta) ta.value = snap.val() || '';
+    }, function(err) {
+      showStatus('Could not load announcement: ' + err.message, true);
+    });
+  }
+
+  function saveAnnouncement() {
+    var ta = document.getElementById('announce-input');
+    if (!ta) return;
+    db.ref('announcements/text').set(ta.value).then(function() {
+      showStatus('Announcement posted.');
+      var hint = document.getElementById('announce-saved-hint');
+      if (hint) {
+        hint.textContent = 'Saved just now';
+        setTimeout(function() { if (hint.textContent === 'Saved just now') hint.textContent = ''; }, 4000);
+      }
+    }).catch(function(err) {
+      showStatus('Failed to post announcement: ' + err.message, true);
+    });
   }
 
   // ======== USER LIST ========
@@ -376,7 +436,7 @@
             html += '<button class="btn-danger" onclick="blockCode(\'' + escJs(u.secret) + '\', \'' + escJs(u.username) + '\')">Block</button>';
           }
         }
-        html += '<button class="btn-danger" onclick="deleteAccount(\'' + escJs(u.id) + '\', \'' + escJs(u.username) + '\')">Delete</button>';
+        html += '<button class="btn-danger" onclick="resetUsername(\'' + escJs(u.id) + '\', \'' + escJs(u.username) + '\')">Reset</button>';
       }
       html += '</div>';
       if (expandedIds[u.id] && !u.stale) {
@@ -455,9 +515,13 @@
 
   function applyRename(id, oldName, newName) {
     var updates = {};
+    if (oldName) {
+      updates['usernames/' + oldName.toLowerCase()] = null; // release old name
+      var histKey = db.ref('users/' + id + '/history').push().key;
+      updates['users/' + id + '/history/' + histKey] = { name: oldName, changedAt: firebase.database.ServerValue.TIMESTAMP };
+    }
     updates['users/' + id + '/username'] = newName;
     updates['usernames/' + newName.toLowerCase()] = id;
-    if (oldName) updates['usernames/' + oldName.toLowerCase()] = null; // release old name
 
     db.ref().update(updates).then(function() {
       relabelChatMessages(id, newName);
@@ -537,24 +601,30 @@
     });
   }
 
-  // ======== DELETE ACCOUNT (release username claim) ========
-  // Removes users/{id} and frees up usernames/{name} so someone else can claim it.
-  // Doesn't touch banned/{code} — if this device was blocked, it stays blocked even
-  // after the account is gone. Doesn't rewrite their old chat messages; those stay
-  // attributed to whatever username they last had.
-  function deleteAccount(id, username) {
-    if (!confirm('Delete this account?\n\n"' + username + '" (' + id + ')\n\nThis frees up the username for anyone to claim. This can\'t be undone.')) return;
+  // ======== RESET USERNAME (frees their claim, forces them to pick a new one) ========
+  // Only clears the username field and the /usernames claim — the account itself
+  // (id, secret code, history, block status if any) stays intact. This means:
+  //  - it shows up live on their screen (and to other players in their room)
+  //    immediately, since the game listens for this field changing
+  //  - it's logged to their rename history like any other rename
+  //  - if they were blocked, resetting their name doesn't undo that
+  function resetUsername(id, username) {
+    if (!confirm('Reset this user\'s username?\n\n"' + username + '" (' + id + ')\n\nFrees the name up for anyone to claim. They\'ll see this happen immediately and be prompted to pick a new one.')) return;
     var updates = {};
-    updates['users/' + id] = null;
+    updates['users/' + id + '/username'] = null;
     if (username && username !== '(none)') {
       updates['usernames/' + username.toLowerCase()] = null;
+      var histKey = db.ref('users/' + id + '/history').push().key;
+      updates['users/' + id + '/history/' + histKey] = { name: username, changedAt: firebase.database.ServerValue.TIMESTAMP };
     }
     db.ref().update(updates).then(function() {
-      allUsers = allUsers.filter(function(u) { return u.id !== id; });
+      var u = allUsers.find(function(u) { return u.id === id; });
+      if (u) u.username = '(none)';
+      delete historyCache[id]; // force a re-fetch next time it's expanded, so the new entry shows
       renderList();
-      showStatus('Deleted "' + username + '".');
+      showStatus('Reset "' + username + '".');
     }).catch(function(err) {
-      showStatus('Delete failed: ' + err.message, true);
+      showStatus('Reset failed: ' + err.message, true);
     });
   }
 
