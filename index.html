@@ -6,6 +6,7 @@
 <title>Chain Reaction — Admin</title>
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
 <style>
   :root {
     --bg: #14100d;
@@ -135,6 +136,24 @@
     padding: 8px 14px; border-top: 1px solid var(--line); background: var(--panel-2);
   }
   .announce-hint { font-size: 11px; color: var(--text-dim); }
+  .announce-toolbar {
+    display: flex; align-items: center; gap: 4px; padding: 6px 8px;
+    border-bottom: 1px solid var(--line); background: var(--panel-2);
+  }
+  .fmt-btn {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 10px; font-size: 12px; min-width: 30px;
+  }
+  .fmt-btn:hover { border-color: var(--accent); }
+  .announce-preview-label {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-dim); padding: 8px 14px 0;
+  }
+  .announce-preview {
+    color: var(--text); min-height: 40px;
+  }
+  .announce-preview .ann-sm { font-size: 0.85em; }
+  .announce-preview .ann-lg { font-size: 1.35em; }
 
   .status {
     position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
@@ -194,14 +213,32 @@
 
     <div class="section-gap">
       <div class="section-title">Announcements</div>
-      <div class="sub">Shown in a box below global chat in the game. Supports multiple lines.</div>
+      <div class="sub">Shown in a box below global chat in the game. Supports multiple lines and light formatting.</div>
       <div class="announce-box">
-        <textarea id="announce-input" placeholder="Nothing posted right now."></textarea>
+        <div class="announce-toolbar">
+          <button class="fmt-btn" type="button" onclick="wrapSelection('**','**')" title="Bold"><b>B</b></button>
+          <button class="fmt-btn" type="button" onclick="wrapSelection('*','*')" title="Italic"><i>I</i></button>
+          <button class="fmt-btn" type="button" onclick="wrapSelection('[size=sm]','[/size]')" title="Small text">A⁻</button>
+          <button class="fmt-btn" type="button" onclick="wrapSelection('[size=lg]','[/size]')" title="Large text">A⁺</button>
+          <span class="announce-hint" style="margin-left:auto;">select text, then click a button</span>
+        </div>
+        <textarea id="announce-input" placeholder="Nothing posted right now." oninput="updateAnnouncePreview()"></textarea>
+        <div class="announce-preview-label">Preview</div>
+        <div class="announce-body announce-preview" id="announce-preview"></div>
         <div class="announce-footer">
           <span class="announce-hint" id="announce-saved-hint"></span>
           <button class="btn-primary" onclick="saveAnnouncement()">Post</button>
         </div>
       </div>
+    </div>
+
+    <!-- ROOMS SECTION -->
+    <div style="margin-top:24px;background:#fff;border-radius:12px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h3 style="margin:0;">Open Rooms</h3>
+        <button class="btn-quiet" onclick="loadRooms()">Refresh</button>
+      </div>
+      <div id="rooms-list" style="font-size:13px;color:#999;">Loading…</div>
     </div>
   </div>
 
@@ -221,18 +258,25 @@
     appId: "1:1013659619628:web:3100ed4eda5164e5159c89"
   });
   var db = firebase.database();
+  firebase.auth().signInAnonymously().catch(function(e) { console.warn('Auth failed:', e); });
 
-  // ======== SIMPLE CLIENT-SIDE GATE ========
-  // Change this to whatever you like. Again: this is a UI convenience, not security.
-  var ADMIN_PASSWORD = "changeme";
+  // ======== SHA-256 PASSWORD GATE ========
+  var ADMIN_HASH = "2a286b0ee691950be3b8aa8e6f45ba86d489e8053c5a253e403f13451c4024df";
 
-  function tryUnlock() {
+  async function sha256(text) {
+    var buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(buf)).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+  }
+
+  async function tryUnlock() {
     var pw = document.getElementById('gate-pw').value;
-    if (pw === ADMIN_PASSWORD) {
+    var hash = await sha256(pw);
+    if (hash === ADMIN_HASH) {
       document.getElementById('gate').style.display = 'none';
       document.getElementById('panel').style.display = 'block';
       loadUsers();
       loadAnnouncement();
+      loadRooms();
     } else {
       showStatus('Wrong password.', true);
     }
@@ -252,15 +296,67 @@
   }
 
   // ======== ANNOUNCEMENTS ========
-  // Single text node at announcements/text. Using a <textarea> (not a single-line
-  // input or a prompt()) is what actually makes newlines work — those other inputs
-  // either can't hold a newline at all or silently strip it. The raw string,
-  // newlines included, is what gets written and later read straight back with
-  // textContent in the game — no per-line splitting or joining on either end.
+  // Single text node at announcements/text. Uses a small custom markup — **bold**,
+  // *italic*, [size=sm]...[/size], [size=lg]...[/size] — rather than real HTML.
+  // The DB is world-writable with no auth, so if the game rendered raw HTML here
+  // (via innerHTML) anyone with write access could inject a script into every
+  // player's session. This parser only recognizes these four tokens and builds
+  // DOM nodes directly; everything else is inserted as plain text (via
+  // textContent), so it can never execute as markup no matter what's typed.
+  function renderAnnouncementMarkup(container, raw) {
+    container.innerHTML = '';
+    if (!raw) return;
+    var re = /\*\*([^*]+)\*\*|\*([^*]+)\*|\[size=(sm|lg)\]([\s\S]*?)\[\/size\]/g;
+    var lastIndex = 0, m;
+    while ((m = re.exec(raw)) !== null) {
+      if (m.index > lastIndex) {
+        container.appendChild(document.createTextNode(raw.slice(lastIndex, m.index)));
+      }
+      if (m[1] !== undefined) {
+        var b = document.createElement('strong');
+        b.textContent = m[1];
+        container.appendChild(b);
+      } else if (m[2] !== undefined) {
+        var i = document.createElement('em');
+        i.textContent = m[2];
+        container.appendChild(i);
+      } else if (m[3] !== undefined) {
+        var s = document.createElement('span');
+        s.className = m[3] === 'sm' ? 'ann-sm' : 'ann-lg';
+        s.textContent = m[4];
+        container.appendChild(s);
+      }
+      lastIndex = re.lastIndex;
+    }
+    if (lastIndex < raw.length) {
+      container.appendChild(document.createTextNode(raw.slice(lastIndex)));
+    }
+  }
+
+  function wrapSelection(before, after) {
+    var ta = document.getElementById('announce-input');
+    var start = ta.selectionStart, end = ta.selectionEnd;
+    var text = ta.value;
+    var selected = text.slice(start, end) || 'text';
+    ta.value = text.slice(0, start) + before + selected + after + text.slice(end);
+    ta.focus();
+    var cs = start + before.length;
+    ta.setSelectionRange(cs, cs + selected.length);
+    updateAnnouncePreview();
+  }
+
+  function updateAnnouncePreview() {
+    var ta = document.getElementById('announce-input');
+    var preview = document.getElementById('announce-preview');
+    if (!ta || !preview) return;
+    renderAnnouncementMarkup(preview, ta.value);
+  }
+
   function loadAnnouncement() {
     db.ref('announcements/text').once('value', function(snap) {
       var ta = document.getElementById('announce-input');
       if (ta) ta.value = snap.val() || '';
+      updateAnnouncePreview();
     }, function(err) {
       showStatus('Could not load announcement: ' + err.message, true);
     });
@@ -646,6 +742,44 @@
           if (Object.keys(updates).length) db.ref('chat/rooms/' + roomCode).update(updates);
         });
       });
+    });
+  }
+
+  // ======== ROOMS MANAGEMENT ========
+  function loadRooms() {
+    var list = document.getElementById('rooms-list');
+    list.innerHTML = 'Loading…';
+    db.ref('rooms').once('value', function(snap) {
+      if (!snap.exists() || !snap.val()) {
+        list.innerHTML = '<em>No open rooms</em>';
+        return;
+      }
+      var rooms = snap.val();
+      var html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+      html += '<tr style="text-align:left;border-bottom:2px solid #eee;"><th style="padding:6px;">Code</th><th style="padding:6px;">Host</th><th style="padding:6px;">Size</th><th style="padding:6px;">Players</th><th style="padding:6px;">Status</th><th style="padding:6px;"></th></tr>';
+      for (var code in rooms) {
+        var r = rooms[code];
+        html += '<tr style="border-bottom:1px solid #f0f0f0;">';
+        html += '<td style="padding:6px;font-weight:700;font-family:monospace;">' + escHtml(code) + '</td>';
+        html += '<td style="padding:6px;">' + escHtml(r.hostName || '?') + '</td>';
+        html += '<td style="padding:6px;">' + (r.size || '?') + '×' + (r.size || '?') + '</td>';
+        html += '<td style="padding:6px;">' + (r.playerCount || 0) + ' (' + (r.humans || 0) + 'H+' + (r.ais || 0) + 'AI)</td>';
+        html += '<td style="padding:6px;">' + (r.inProgress ? '<span style="color:#e87ea8;">In Progress</span>' : '<span style="color:#6ecf6e;">Waiting</span>') + '</td>';
+        html += '<td style="padding:6px;"><button class="btn-quiet" style="color:#e55;" onclick="closeRoom(\'' + escJs(code) + '\')">Close</button></td>';
+        html += '</tr>';
+      }
+      html += '</table>';
+      list.innerHTML = html;
+    });
+  }
+
+  function closeRoom(code) {
+    if (!confirm('Close room ' + code + '? This removes it from the public list.')) return;
+    db.ref('rooms/' + code).remove().then(function() {
+      showStatus('Room ' + code + ' closed.');
+      loadRooms();
+    }).catch(function(e) {
+      showStatus('Failed to close room: ' + e.message, true);
     });
   }
 
